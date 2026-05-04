@@ -1,5 +1,6 @@
 const MULTI_SELECT_CATEGORIES = ["Genre", "Supporting Character", "Theme & Event"];
 const GENRE_RANKED_CONTEXTS = ["synergy", "advertisers", "generator"];
+const AVAILABILITY_STORAGE_KEY = 'hac-availability-v1';
 let searchIndex = [];
 let currentTab = 'synergy'; 
 let generatedScriptsCache = []; // Stores the current batch of 5 scripts
@@ -11,11 +12,18 @@ let currentLanguage = 'English';
 
 // --- NEW: PROFILE STATE ---
 let currentGenProfile = 'custom'; // 'custom' or 'starting'
+let availabilityState = {
+    profile: 'all', // all | starting | custom
+    enabled: new Set()
+};
 
 window.onload = async function() {
     try {
         await changeLanguage('English', false); 
         await loadExternalData();
+        initAvailabilityState();
+        renderAvailabilitySettings();
+
         initializeSelectors('advertisers');
         initializeSelectors('synergy');
         
@@ -36,6 +44,9 @@ window.onload = async function() {
         
         // RENDER PINNED SECTION IMMEDIATELY (To show Save/Load buttons)
         renderPinnedScripts();
+
+        // Ensure every context is rebuilt using the saved availability profile.
+        applyAvailabilityChanges(true);
 
         console.log("Initialization Complete.");
     } catch (error) {
@@ -60,7 +71,7 @@ function setGeneratorProfile(profileName) {
     if (profileName === 'starting') {
         descText.innerHTML = "Only <strong style='color:var(--accent);'>Starting Tags</strong> are available. Everything else is moved to Excluded.";
     } else {
-        descText.innerHTML = "All tags are available. You can manually exclude tags below.";
+        descText.innerHTML = "All globally enabled tags are available. You can manually exclude tags below.";
     }
 
     // 3. Handle Exclusion Logic
@@ -75,7 +86,7 @@ function setGeneratorProfile(profileName) {
 function populateExcludedForStartingProfile() {
     initializeSelectors('excluded');
     const whitelist = new Set(GAME_DATA.starterWhitelist || []);
-    const allTags = Object.values(GAME_DATA.tags);
+    const allTags = Object.values(GAME_DATA.tags).filter(tag => isTagAvailable(tag.id));
     const container = document.getElementById('selectors-container-excluded');
     
     container.style.display = 'none'; // Performance optimization
@@ -85,6 +96,231 @@ function populateExcludedForStartingProfile() {
         }
     });
     container.style.display = 'grid'; 
+}
+
+function getAllTagIds() {
+    return Object.keys(GAME_DATA.tags);
+}
+
+function getStarterTagSet() {
+    return new Set((GAME_DATA.starterWhitelist || []).filter(id => GAME_DATA.tags[id]));
+}
+
+function getEffectiveAvailableSet() {
+    if (availabilityState.profile === 'all') {
+        return new Set(getAllTagIds());
+    }
+    return new Set([...availabilityState.enabled].filter(id => GAME_DATA.tags[id]));
+}
+
+function isTagAvailable(tagId) {
+    if (!GAME_DATA.tags[tagId]) return false;
+    if (availabilityState.profile === 'all') return true;
+    return availabilityState.enabled.has(tagId);
+}
+
+function saveAvailabilityState() {
+    const payload = {
+        profile: availabilityState.profile,
+        enabled: [...availabilityState.enabled]
+    };
+    localStorage.setItem(AVAILABILITY_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function normalizeAvailabilityState() {
+    const allTagIds = new Set(getAllTagIds());
+    availabilityState.enabled = new Set([...availabilityState.enabled].filter(id => allTagIds.has(id)));
+
+    if (availabilityState.profile === 'starting') {
+        availabilityState.enabled = getStarterTagSet();
+    }
+}
+
+function initAvailabilityState() {
+    const raw = localStorage.getItem(AVAILABILITY_STORAGE_KEY);
+    if (!raw) {
+        availabilityState.profile = 'all';
+        availabilityState.enabled = new Set(getAllTagIds());
+        saveAvailabilityState();
+        return;
+    }
+
+    try {
+        const parsed = JSON.parse(raw);
+        const profile = ['all', 'starting', 'custom'].includes(parsed.profile) ? parsed.profile : 'all';
+        const enabledIds = Array.isArray(parsed.enabled) ? parsed.enabled : [];
+
+        availabilityState.profile = profile;
+        availabilityState.enabled = new Set(enabledIds);
+        normalizeAvailabilityState();
+
+        if (availabilityState.profile === 'all') {
+            availabilityState.enabled = new Set(getAllTagIds());
+        }
+    } catch (error) {
+        console.warn('Failed to parse availability settings, reverting to defaults.', error);
+        availabilityState.profile = 'all';
+        availabilityState.enabled = new Set(getAllTagIds());
+    }
+}
+
+function updateAvailabilityProfileButtons() {
+    ['all', 'starting', 'custom'].forEach(profile => {
+        const btn = document.getElementById(`btn-availability-${profile}`);
+        if (btn) {
+            btn.classList.toggle('active', availabilityState.profile === profile);
+        }
+    });
+}
+
+function setAvailabilityProfile(profile) {
+    if (!['all', 'starting', 'custom'].includes(profile)) return;
+
+    if (profile === 'all') {
+        availabilityState.profile = 'all';
+        availabilityState.enabled = new Set(getAllTagIds());
+    } else if (profile === 'starting') {
+        availabilityState.profile = 'starting';
+        availabilityState.enabled = getStarterTagSet();
+    } else {
+        if (availabilityState.profile === 'all') {
+            availabilityState.enabled = new Set(getAllTagIds());
+        } else if (availabilityState.profile === 'starting') {
+            availabilityState.enabled = getStarterTagSet();
+        }
+        availabilityState.profile = 'custom';
+    }
+
+    applyAvailabilityChanges();
+}
+
+function setCustomAvailabilityAll() {
+    availabilityState.profile = 'custom';
+    availabilityState.enabled = new Set(getAllTagIds());
+    applyAvailabilityChanges();
+}
+
+function setCustomAvailabilityStarter() {
+    availabilityState.profile = 'custom';
+    availabilityState.enabled = getStarterTagSet();
+    applyAvailabilityChanges();
+}
+
+function setCustomAvailabilityNone() {
+    availabilityState.profile = 'custom';
+    availabilityState.enabled = new Set();
+    applyAvailabilityChanges();
+}
+
+function toggleCustomAvailabilityTag(tagId, isEnabled) {
+    if (availabilityState.profile !== 'custom') {
+        availabilityState.profile = 'custom';
+        availabilityState.enabled = getEffectiveAvailableSet();
+    }
+
+    if (isEnabled) {
+        availabilityState.enabled.add(tagId);
+    } else {
+        availabilityState.enabled.delete(tagId);
+    }
+
+    applyAvailabilityChanges();
+}
+
+function renderAvailabilitySettings() {
+    const grid = document.getElementById('availability-settings-grid');
+    const statusText = document.getElementById('availabilityStatusText');
+    if (!grid || !statusText) return;
+
+    updateAvailabilityProfileButtons();
+
+    const effectiveSet = getEffectiveAvailableSet();
+    const totalCount = getAllTagIds().length;
+    statusText.innerText = `Enabled ${effectiveSet.size} / ${totalCount} tags.`;
+
+    const isReadOnly = availabilityState.profile !== 'custom';
+    grid.innerHTML = '';
+
+    GAME_DATA.categories.forEach(category => {
+        const tags = Object.values(GAME_DATA.tags)
+            .filter(tag => tag.category === category)
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        if (tags.length === 0) return;
+
+        const enabledCount = tags.filter(tag => effectiveSet.has(tag.id)).length;
+
+        const group = document.createElement('div');
+        group.className = 'availability-category';
+
+        const header = document.createElement('div');
+        header.className = 'availability-category-header';
+        header.innerHTML = `
+            <span>${category}</span>
+            <small>${enabledCount}/${tags.length}</small>
+        `;
+        group.appendChild(header);
+
+        const list = document.createElement('div');
+        list.className = 'availability-list';
+
+        tags.forEach(tag => {
+            const row = document.createElement('label');
+            row.className = 'availability-item';
+
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.checked = effectiveSet.has(tag.id);
+            input.disabled = isReadOnly;
+            input.addEventListener('change', (e) => {
+                toggleCustomAvailabilityTag(tag.id, e.target.checked);
+            });
+
+            const text = document.createElement('span');
+            text.innerText = tag.name;
+
+            row.appendChild(input);
+            row.appendChild(text);
+            list.appendChild(row);
+        });
+
+        group.appendChild(list);
+        grid.appendChild(group);
+    });
+}
+
+function rerenderSelectorsForAvailability() {
+    const contexts = ['synergy', 'advertisers', 'generator', 'excluded'];
+    const savedByContext = {};
+
+    contexts.forEach(context => {
+        savedByContext[context] = collectTagInputs(context).filter(item => isTagAvailable(item.id));
+    });
+
+    initializeSelectors('synergy');
+    initializeSelectors('advertisers');
+    initializeSelectors('generator');
+    initializeSelectors('excluded');
+
+    restoreSelection('synergy', savedByContext.synergy);
+    restoreSelection('advertisers', savedByContext.advertisers);
+    restoreSelection('generator', savedByContext.generator);
+    restoreSelection('excluded', savedByContext.excluded);
+
+    if (currentGenProfile === 'starting') {
+        populateExcludedForStartingProfile();
+    }
+}
+
+function applyAvailabilityChanges(skipSelectorRefresh = false) {
+    normalizeAvailabilityState();
+    saveAvailabilityState();
+    buildSearchIndex();
+    renderAvailabilitySettings();
+
+    if (!skipSelectorRefresh) {
+        rerenderSelectorsForAvailability();
+    }
 }
 
 /* =========================================================================
@@ -108,6 +344,8 @@ async function changeLanguage(langName, shouldRender = true) {
         }
         if (Object.keys(GAME_DATA.tags).length > 0) {
             updateAllTagNames();
+            normalizeAvailabilityState();
+            renderAvailabilitySettings();
             buildSearchIndex(); 
             if (shouldRender) {
                 const savedSynergy = collectTagInputs('synergy');
@@ -120,10 +358,10 @@ async function changeLanguage(langName, shouldRender = true) {
                 initializeSelectors('generator');
                 initializeSelectors('excluded');
                 
-                restoreSelection('synergy', savedSynergy);
-                restoreSelection('advertisers', savedAdvertisers);
-                restoreSelection('generator', savedGenerator);
-                restoreSelection('excluded', savedExcluded);
+                restoreSelection('synergy', savedSynergy.filter(item => isTagAvailable(item.id)));
+                restoreSelection('advertisers', savedAdvertisers.filter(item => isTagAvailable(item.id)));
+                restoreSelection('generator', savedGenerator.filter(item => isTagAvailable(item.id)));
+                restoreSelection('excluded', savedExcluded.filter(item => isTagAvailable(item.id)));
                 
                 if(currentGenProfile === 'starting') {
                     populateExcludedForStartingProfile();
@@ -182,11 +420,9 @@ function restoreSelection(context, savedInputs) {
 function switchTab(tabName) {
     currentTab = tabName;
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    
-    const btns = document.querySelectorAll('.tab-btn');
-    if(tabName === 'generator') btns[0].classList.add('active');
-    else if(tabName === 'synergy') btns[1].classList.add('active');
-    else btns[2].classList.add('active'); // Advertisers
+
+    const activeBtn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
+    if (activeBtn) activeBtn.classList.add('active');
     
     document.querySelectorAll('.tab-content').forEach(content => content.classList.add('hidden'));
     document.getElementById(`tab-${tabName}`).classList.remove('hidden');
@@ -360,7 +596,7 @@ function initializeSelectors(context) {
     container.innerHTML = ''; 
     GAME_DATA.categories.forEach(category => {
         const tagsInCategory = Object.values(GAME_DATA.tags).filter(t => 
-            t.category === category
+            t.category === category && isTagAvailable(t.id)
         ).sort((a, b) => a.name.localeCompare(b.name));
         if (tagsInCategory.length === 0) return;
         
@@ -409,7 +645,7 @@ function addDropdown(category, selectedId = null, context = currentTab) {
         return;
     }
     
-    const tags = Object.values(GAME_DATA.tags).filter(t => t.category === category)
+    const tags = Object.values(GAME_DATA.tags).filter(t => t.category === category && isTagAvailable(t.id))
                  .sort((a, b) => a.name.localeCompare(b.name));
     const row = document.createElement('div');
     row.className = 'select-row';
@@ -523,7 +759,7 @@ function updateGenreControls(context) {
 }
 
 function buildSearchIndex() {
-    searchIndex = Object.values(GAME_DATA.tags).map(tag => {
+    searchIndex = Object.values(GAME_DATA.tags).filter(tag => isTagAvailable(tag.id)).map(tag => {
         return {
             id: tag.id,
             name: tag.name,
@@ -713,7 +949,7 @@ function calculateContextFit(tagId, comparisonTags) {
 }
 
 function getRankedCategoryTags(category, comparisonTags) {
-    const tags = Object.values(GAME_DATA.tags).filter(t => t.category === category);
+    const tags = Object.values(GAME_DATA.tags).filter(t => t.category === category && isTagAvailable(t.id));
 
     if (!comparisonTags || comparisonTags.length === 0) {
         return tags
@@ -999,7 +1235,7 @@ function getCompatibleGenres(sourceId, excludedIds) {
         }
     }
     const unique = new Set(valid);
-    return [...unique].filter(id => !excludedIds.has(id));
+    return [...unique].filter(id => !excludedIds.has(id) && isTagAvailable(id));
 }
 
 function getScoringElementCount(tags) {
@@ -1008,7 +1244,7 @@ function getScoringElementCount(tags) {
 
 function getRandomTagByCategory(category, currentTags, excludedIds) {
     const existingIds = new Set(currentTags.map(t => t.id));
-    const allTags = Object.values(GAME_DATA.tags).filter(t => t.category === category);
+    const allTags = Object.values(GAME_DATA.tags).filter(t => t.category === category && isTagAvailable(t.id));
     const available = allTags.filter(t => !existingIds.has(t.id) && !excludedIds.has(t.id));
     
     if(available.length === 0) return null;
@@ -1265,6 +1501,7 @@ function transferScriptToAdvertisers(uniqueId) {
     initializeSelectors('advertisers'); 
     
     script.tags.forEach(t => {
+        if (!isTagAvailable(t.id)) return;
         const category = t.category;
         const containerId = `inputs-${category.replace(/\s/g, '-')}-advertisers`;
         const container = document.getElementById(containerId);

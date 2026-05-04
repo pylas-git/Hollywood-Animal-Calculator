@@ -38,9 +38,10 @@
 
         <!-- TAB NAVIGATION -->
         <nav class="tab-nav">
-            <button class="tab-btn" onclick="switchTab('generator')">Script Generator</button>
-            <button class="tab-btn active" onclick="switchTab('synergy')">SE Compatibility</button>
-            <button class="tab-btn" onclick="switchTab('advertisers')">Best Advertisers</button>
+            <button class="tab-btn" data-tab="generator" onclick="switchTab('generator')">Script Generator</button>
+            <button class="tab-btn active" data-tab="synergy" onclick="switchTab('synergy')">SE Compatibility</button>
+            <button class="tab-btn" data-tab="advertisers" onclick="switchTab('advertisers')">Best Advertisers</button>
+            <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Settings</button>
         </nav>
 
         <div class="container">
@@ -353,6 +354,32 @@
                             <div id="campaignStrategyDisplay"></div>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- TAB 4: SETTINGS -->
+            <div id="tab-settings" class="tab-content hidden">
+                <div class="card builder-card">
+                    <div class="card-header">
+                        <h3>Tag Unlock Settings</h3>
+                    </div>
+                    <p class="subtitle">Control which tags are available globally. These options affect Compatibility, Advertisers, and Generator tabs.</p>
+
+                    <div class="availability-profile-row">
+                        <button id="btn-availability-all" class="profile-btn active" onclick="setAvailabilityProfile('all')">All Tags</button>
+                        <button id="btn-availability-starting" class="profile-btn" onclick="setAvailabilityProfile('starting')">Starting Only</button>
+                        <button id="btn-availability-custom" class="profile-btn" onclick="setAvailabilityProfile('custom')">Custom</button>
+                    </div>
+
+                    <p id="availabilityStatusText" class="subtitle" style="margin-top: 12px; margin-bottom: 16px;"></p>
+
+                    <div class="settings-actions-row">
+                        <button class="reset-btn" onclick="setCustomAvailabilityAll()">Custom: Enable All</button>
+                        <button class="reset-btn" onclick="setCustomAvailabilityStarter()">Custom: Starter Tags</button>
+                        <button class="reset-btn" onclick="setCustomAvailabilityNone()">Custom: Disable All</button>
+                    </div>
+
+                    <div id="availability-settings-grid" class="availability-grid"></div>
                 </div>
             </div>
 
