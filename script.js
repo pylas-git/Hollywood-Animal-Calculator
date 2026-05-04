@@ -1,4 +1,5 @@
 const MULTI_SELECT_CATEGORIES = ["Genre", "Supporting Character", "Theme & Event"];
+const GENRE_RANKED_CONTEXTS = ["synergy", "advertisers", "generator"];
 let searchIndex = [];
 let currentTab = 'synergy'; 
 let generatedScriptsCache = []; // Stores the current batch of 5 scripts
@@ -174,6 +175,8 @@ function restoreSelection(context, savedInputs) {
             }
         });
     }
+
+    applyGenreRankingToContext(context);
 }
 
 function switchTab(tabName) {
@@ -390,6 +393,8 @@ function initializeSelectors(context) {
         container.appendChild(groupDiv);
         addDropdown(category, null, context);
     });
+
+    applyGenreRankingToContext(context);
 }
 
 function addDropdown(category, selectedId = null, context = currentTab) {
@@ -421,8 +426,17 @@ function addDropdown(category, selectedId = null, context = currentTab) {
         const opt = document.createElement('option');
         opt.value = tag.id;
         opt.innerText = tag.name;
+        opt.dataset.baseName = tag.name;
         select.appendChild(opt);
     });
+
+    select.addEventListener('change', () => {
+        if (category === 'Genre' && context !== 'excluded') {
+            updateGenreControls(context);
+        }
+        applyGenreRankingToContext(context);
+    });
+
     if (selectedId) select.value = selectedId;
     row.appendChild(select);
     
@@ -449,10 +463,12 @@ function addDropdown(category, selectedId = null, context = currentTab) {
         numInput.addEventListener('input', (e) => {
             slider.value = e.target.value;
             updatePercentSliderTrack(slider);
+            applyGenreRankingToContext(context);
         });
         slider.addEventListener('input', (e) => {
             numInput.value = e.target.value;
             updatePercentSliderTrack(slider);
+            applyGenreRankingToContext(context);
         });
         updatePercentSliderTrack(slider);
         percentWrapper.appendChild(slider);
@@ -467,7 +483,10 @@ function addDropdown(category, selectedId = null, context = currentTab) {
         removeBtn.innerHTML = '×';
         removeBtn.onclick = () => {
             row.remove();
-            if (category === 'Genre' && context !== 'excluded') updateGenreControls(context);
+            if (category === 'Genre' && context !== 'excluded') {
+                updateGenreControls(context);
+            }
+            applyGenreRankingToContext(context);
         };
         row.appendChild(removeBtn);
     }
@@ -475,6 +494,8 @@ function addDropdown(category, selectedId = null, context = currentTab) {
     if (category === 'Genre' && context !== 'excluded') {
         updateGenreControls(context);
     }
+
+    applyGenreRankingToContext(context);
 }
 
 function updateGenreControls(context) {
@@ -581,6 +602,8 @@ function selectTagFromSearch(tagObj, context) {
         setTimeout(() => group.style.borderColor = '', 500);
         group.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
+
+    applyGenreRankingToContext(context);
 }
 
 function collectTagInputs(context) {
@@ -628,6 +651,164 @@ function collectTagInputs(context) {
         }
     });
     return tagInputs;
+}
+
+function getRawCompatibility(tagAId, tagBId) {
+    if (GAME_DATA.compatibility[tagAId] && GAME_DATA.compatibility[tagAId][tagBId]) {
+        return parseFloat(GAME_DATA.compatibility[tagAId][tagBId]);
+    }
+    if (GAME_DATA.compatibility[tagBId] && GAME_DATA.compatibility[tagBId][tagAId]) {
+        return parseFloat(GAME_DATA.compatibility[tagBId][tagAId]);
+    }
+    return 3.0;
+}
+
+function getRecommendationWeight(tagInput) {
+    if (tagInput.category === 'Genre') {
+        // Keep multi-genre influence meaningful while still respecting percentages.
+        return Math.max(0.5, (tagInput.percent || 0) * 2.0);
+    }
+    return 1.0;
+}
+
+function calculateContextFit(tagId, comparisonTags) {
+    if (!comparisonTags || comparisonTags.length === 0) {
+        return {
+            average: null,
+            adjusted: null,
+            conflicts: 0
+        };
+    }
+
+    let weightedSum = 0;
+    let totalWeight = 0;
+    let severeConflicts = 0;
+
+    comparisonTags.forEach(tagInput => {
+        if (tagInput.id === tagId) return;
+
+        const raw = getRawCompatibility(tagId, tagInput.id);
+        const weight = getRecommendationWeight(tagInput);
+        weightedSum += raw * weight;
+        totalWeight += weight;
+
+        if (raw <= 1.0) severeConflicts++;
+    });
+
+    if (totalWeight <= 0) {
+        return {
+            average: null,
+            adjusted: null,
+            conflicts: 0
+        };
+    }
+
+    const average = weightedSum / totalWeight;
+    const adjusted = Math.max(0, average - (severeConflicts * 2.0));
+    return {
+        average,
+        adjusted,
+        conflicts: severeConflicts
+    };
+}
+
+function getRankedCategoryTags(category, comparisonTags) {
+    const tags = Object.values(GAME_DATA.tags).filter(t => t.category === category);
+
+    if (!comparisonTags || comparisonTags.length === 0) {
+        return tags
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map(tag => ({
+                tag,
+                score: null,
+                conflicts: 0
+            }));
+    }
+
+    return tags
+        .map(tag => {
+            const fit = calculateContextFit(tag.id, comparisonTags);
+            return {
+                tag,
+                score: fit.adjusted,
+                conflicts: fit.conflicts
+            };
+        })
+        .sort((a, b) => {
+            if (a.conflicts !== b.conflicts) return a.conflicts - b.conflicts;
+            if (b.score !== a.score) return b.score - a.score;
+            return a.tag.name.localeCompare(b.tag.name);
+        });
+}
+
+function setSelectFitClass(select, score) {
+    select.classList.remove('fit-high', 'fit-mid', 'fit-low');
+    if (typeof score !== 'number') return;
+
+    if (score >= 4.0) select.classList.add('fit-high');
+    else if (score >= 3.0) select.classList.add('fit-mid');
+    else select.classList.add('fit-low');
+}
+
+function refreshRankedSelectOptions(select, category, comparisonTags) {
+    const currentValue = select.value;
+    const defaultText = comparisonTags.length > 0
+        ? `-- Select ${category} (best fit, no conflicts first) --`
+        : `-- Select ${category} --`;
+    const ranked = getRankedCategoryTags(category, comparisonTags);
+
+    select.innerHTML = '';
+    const defOpt = document.createElement('option');
+    defOpt.value = '';
+    defOpt.innerText = defaultText;
+    select.appendChild(defOpt);
+
+    ranked.forEach((entry, idx) => {
+        const opt = document.createElement('option');
+        opt.value = entry.tag.id;
+        opt.dataset.baseName = entry.tag.name;
+
+        if (typeof entry.score === 'number') {
+            const rankLabel = idx < 3 ? `${idx + 1}. ` : '';
+            opt.dataset.fitScore = entry.score.toFixed(2);
+            const conflictLabel = entry.conflicts > 0 ? ` [conflict x${entry.conflicts}]` : '';
+            opt.innerText = `${rankLabel}${entry.tag.name} (${entry.score.toFixed(2)}/5)${conflictLabel}`;
+        } else {
+            opt.dataset.fitScore = '';
+            opt.innerText = entry.tag.name;
+        }
+
+        select.appendChild(opt);
+    });
+
+    if (currentValue && ranked.some(entry => entry.tag.id === currentValue)) {
+        select.value = currentValue;
+    }
+
+    const chosen = select.options[select.selectedIndex];
+    const chosenScore = chosen ? parseFloat(chosen.dataset.fitScore) : NaN;
+    setSelectFitClass(select, Number.isFinite(chosenScore) ? chosenScore : null);
+}
+
+function applyGenreRankingToContext(context) {
+    if (!GENRE_RANKED_CONTEXTS.includes(context)) return;
+
+    const selectedTags = collectTagInputs(context);
+
+    GAME_DATA.categories.forEach(category => {
+        if (category === 'Genre') return;
+
+        const comparisonTags = selectedTags.filter(item => item.category !== category);
+
+        const containerId = `inputs-${category.replace(/\s/g, '-')}-${context}`;
+        const container = document.getElementById(containerId);
+        if (!container) return;
+
+        const selects = container.querySelectorAll('select.tag-selector');
+        selects.forEach(select => {
+            refreshRankedSelectOptions(select, category, comparisonTags);
+        });
+    });
 }
 
 /* =========================================================================
@@ -1107,6 +1288,8 @@ function transferScriptToAdvertisers(uniqueId) {
     if(genres.length > 1) {
         updateGenreControls('advertisers');
     }
+
+    applyGenreRankingToContext('advertisers');
     
     analyzeMovie();
 }
@@ -1624,6 +1807,29 @@ function formatSimpleScore(num) {
     return (num > 0 ? "+" : "") + parseFloat(num.toFixed(2));
 }
 
+function dedupeConflictMessages(messages) {
+    const map = new Map();
+
+    messages.forEach(msg => {
+        const parts = msg.split(' conflicts with ');
+        if (parts.length === 2) {
+            const left = parts[0].trim();
+            const right = parts[1].trim();
+            const key = [left, right].sort((a, b) => a.localeCompare(b)).join('::');
+            if (!map.has(key)) {
+                map.set(key, `${left} conflicts with ${right}`);
+            }
+            return;
+        }
+
+        if (!map.has(msg)) {
+            map.set(msg, msg);
+        }
+    });
+
+    return Array.from(map.values());
+}
+
 function renderSynergyResults(matrix, bonuses, tags) {
     document.getElementById('results-synergy').classList.remove('hidden');
     const avgEl = document.getElementById('synergyAverageDisplay');
@@ -1696,7 +1902,7 @@ function renderSynergyResults(matrix, bonuses, tags) {
 
     const spoilerEl = document.getElementById('spoilerDisplay');
     if (matrix.spoilers.length > 0) {
-        let uniqueSpoilers = [...new Set(matrix.spoilers)];
+        let uniqueSpoilers = dedupeConflictMessages(matrix.spoilers);
         spoilerEl.innerHTML = uniqueSpoilers.map(s => 
             `<div style="color:var(--danger); padding: 4px 0; border-bottom:1px solid #444;">${s}</div>`
         ).join('');
@@ -1762,5 +1968,8 @@ function transferTagsToAdvertisers() {
             }
         });
     }
+
+    applyGenreRankingToContext('advertisers');
+
     analyzeMovie();
 }
